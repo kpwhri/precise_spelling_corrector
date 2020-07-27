@@ -1,0 +1,4 @@
+hypothesis
+pytest
+regex
+regexify
