@@ -3,6 +3,7 @@ import pathlib
 from regexify import PatternTrie
 import string
 import regex as re
+from loguru import logger
 
 LETTERS = ' ' + string.ascii_letters + string.digits + string.digits
 
@@ -39,17 +40,20 @@ class Vocab:
     def _clean_terms(self, term):
         if not term.strip():
             return
-        for row in term.strip().split('\t'):
-            if len(row) >= 2:
-                yield row[0].strip(), int(row[1])
-            else:
-                yield row[0].strip(), 1
+        row = term.strip().split('\t')
+        if len(row) >= 2:
+            yield row[0].strip(), int(row[1])
+        else:
+            yield row[0].strip(), 1
+
+    def add_word(self, term, freq):
+        if len(term) > len(self.longest_word):
+            self.longest_word = term
+        self.data[term] = freq
 
     def add_words_from_iter(self, it):
         for term, freq in it:
-            if len(term) > len(self.longest_word):
-                self.longest_word = term
-            self.data[term] = freq
+            self.add_word(term, freq)
 
     def _file_to_iter(self, input_file, encoding='utf8'):
         if not input_file:
@@ -162,6 +166,7 @@ class SpellCorrector:
         for term in search_terms:
             term = term.lower()
             self._terms.append(term)
+            self.vocab.add_word(term, 1)
             # get edit distance 1...
             res = [x for x in edit_distance_1(term, self.vocab)]
             # if still not found, use the edit distance 1 to calc edit distance 2
@@ -203,9 +208,10 @@ def spell_correct_words(text, sc: SpellCorrector, use_regex=True):
         if lword in sc.vocab:  # word already known
             yield word
         elif lword in sc:
+            logger.info(f'Changing {lword} to {sc[lword]}')
             yield retain_word_shape(word, sc[lword])
         else:
-            print(f'Failed to find term corresponding to {lword}, even though it was matched.')
+            logger.warning(f'Failed to find term corresponding to {lword}, even though it was matched.')
             yield word
 
 
@@ -214,7 +220,7 @@ def iteratively_correct_text(source, dest, sc: SpellCorrector):
     for source_path in (p for p in source.rglob('*') if p.is_file()):
         dest_path = (dest / source_path.relative_to(source)).resolve()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(source_path) as fh, open(dest_path, 'w') as out:
+        with open(source_path, encoding='utf8') as fh, open(dest_path, 'w', encoding='utf8') as out:
             for segment in spell_correct_words(fh.read(), sc):
                 out.write(segment)
 
@@ -234,7 +240,7 @@ def correct_text(search_terms, search_term_path, input_directory, output_directo
 def correct_text_cmd():
     import argparse
     parser = argparse.ArgumentParser(fromfile_prefix_chars='@!')
-    parser.add_argument('--search-terms', '+', dest='search_terms', default=list(),
+    parser.add_argument('--search-terms', nargs='+', dest='search_terms', default=list(),
                         help='Terms to search for')
     parser.add_argument('--search-term-file', dest='search_term_file', default=None,
                         help='Terms to search for in a file, one word per line')
@@ -257,3 +263,4 @@ def correct_text_cmd():
 
 if __name__ == '__main__':
     correct_text_cmd()
+    logger.add('correct_text.log')
