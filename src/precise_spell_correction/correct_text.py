@@ -1,4 +1,5 @@
 import pathlib
+from collections import Counter
 
 from regexify import PatternTrie
 import string
@@ -86,6 +87,28 @@ def ensure_unicode(s, encoding='utf-8'):
     if isinstance(s, bytes):
         return s.decode(encoding)
     return s
+
+
+class Transformations:
+    """Keep track of transformations"""
+
+    def __init__(self):
+        self._transform = Counter()
+        self._failed = Counter()
+
+    def transform(self, src, dest):
+        self._transform[(src, dest)] += 1
+
+    def failed_to_transform(self, term):
+        self._failed[term] += 1
+
+    def to_file(self, d: pathlib.Path):
+        with open(d / 'transform_freq.txt', 'w') as out:
+            for (src, dest), cnt in self._transform.most_common():
+                out.write(f'{src}\t{dest}\t{cnt}\n')
+        with open(d / 'no_transform.txt', 'w') as out:
+            for term, cnt in self._failed.most_common():
+                out.write(f'{term}\t{cnt}\n')
 
 
 class SpellCorrector:
@@ -189,7 +212,7 @@ def retain_word_shape(old_word: str, new_word: str):
     return new_word
 
 
-def spell_correct_words(text, sc: SpellCorrector, use_regex=True):
+def spell_correct_words(text, sc: SpellCorrector, transform: Transformations, *, use_regex=True):
     text = ''.join([i if ord(i) < 128 else ' ' for i in text])  # strip non-ascii
     if use_regex:
         it = sc.splititer(text)
@@ -205,20 +228,23 @@ def spell_correct_words(text, sc: SpellCorrector, use_regex=True):
         if lword in sc.vocab:  # word already known
             yield word
         elif lword in sc:
-            logger.info(f'Changing {lword} to {sc[lword]}')
-            yield retain_word_shape(word, sc[lword])
+            new_word = sc[lword]
+            transform.transform(lword, new_word)
+            logger.info(f'Changing {lword} to {new_word}')
+            yield retain_word_shape(word, new_word)
         else:
+            transform.failed_to_transform(lword)
             logger.warning(f'Failed to find term corresponding to {lword}, even though it was matched.')
             yield word
 
 
-def iteratively_correct_text(source, dest, sc: SpellCorrector):
+def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transformations):
     dest.mkdir(exist_ok=True)
     for source_path in (p for p in source.rglob('*') if p.is_file()):
         dest_path = (dest / source_path.relative_to(source)).resolve()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(source_path, encoding='utf8') as fh, open(dest_path, 'w', encoding='utf8') as out:
-            for segment in spell_correct_words(fh.read(), sc):
+            for segment in spell_correct_words(fh.read(), sc, transform):
                 out.write(segment)
 
 
@@ -231,7 +257,9 @@ def correct_text(search_terms, search_term_path, input_directory, output_directo
         raise ValueError('No search terms provided.')
     source = pathlib.Path(input_directory)
     dest = pathlib.Path(output_directory)
-    iteratively_correct_text(source, dest, sc)
+    transform = Transformations()
+    iteratively_correct_text(source, dest, sc, transform)
+    transform.to_file(dest)
 
 
 def correct_text_cmd():
@@ -253,6 +281,8 @@ def correct_text_cmd():
                              ' logs will also go here')
     args = parser.parse_args()
 
+    logger.add(pathlib.Path(args.output_directory) / 'correct_text.log')
+
     correct_text(args.search_terms, args.search_term_file, args.input_directory, args.output_directory,
                  args.vocab_file, args.min_freq
                  )
@@ -260,4 +290,3 @@ def correct_text_cmd():
 
 if __name__ == '__main__':
     correct_text_cmd()
-    logger.add('correct_text.log')
