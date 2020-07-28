@@ -5,7 +5,7 @@ import string
 import regex as re
 from loguru import logger
 
-LETTERS = ' ' + string.ascii_letters + string.digits + string.digits
+LETTERS = ' ' + string.ascii_letters + string.digits + string.punctuation
 
 
 class Vocab:
@@ -88,53 +88,6 @@ def ensure_unicode(s, encoding='utf-8'):
     return s
 
 
-def edit_distance_1(word, vocab):
-    """ Compute all strings that are one edit away from `word` using only
-        the letters in the corpus
-        Args:
-            word (str): The word for which to calculate the edit distance
-        Returns:
-            set: The set of strings that are edit distance one from the \
-            provided word """
-    word = ensure_unicode(word).lower()
-    if vocab.check_if_should_check(word):
-        return {word}
-    letters = string.ascii_lowercase + string.digits
-    splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
-    deletes = [L + R[1:] for L, R in splits if R]
-    transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
-    replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
-    inserts = [L + c + R for L, R in splits for c in letters]
-    return set(deletes + transposes + replaces + inserts)
-
-
-def edit_distance_2(word, vocab):
-    """ Compute all strings that are two edits away from `word` using only
-        the letters in the corpus
-        Args:
-            word (str): The word for which to calculate the edit distance
-        Returns:
-            set: The set of strings that are edit distance two from the \
-            provided word """
-    word = ensure_unicode(word).lower()
-    return [
-        e2 for e1 in edit_distance_1(word, vocab) for e2 in edit_distance_1(e1, vocab)
-    ]
-
-
-def edit_distance_alt(words, vocab):
-    """ Compute all strings that are 1 edits away from all the words using
-        only the letters in the corpus
-        Args:
-            words (list): The words for which to calculate the edit distance
-        Returns:
-            set: The set of strings that are edit distance two from the \
-            provided words """
-    words = (ensure_unicode(w).lower() for w in words)
-    words = (w for w in words if vocab.check_if_should_check(w))
-    return [e2 for e1 in words for e2 in edit_distance_1(e1, vocab)]
-
-
 class SpellCorrector:
 
     def __init__(self, vocab, ):
@@ -168,10 +121,10 @@ class SpellCorrector:
             self._terms.append(term)
             self.vocab.add_word(term, 1)
             # get edit distance 1...
-            res = [x for x in edit_distance_1(term, self.vocab)]
+            res = [x for x in self.edit_distance_1(term)]
             # if still not found, use the edit distance 1 to calc edit distance 2
             if edit_distance == 2:
-                res = [x for x in edit_distance_alt(res, self.vocab)]
+                res = [x for x in self.edit_distance_alt(res)]
             for r in res:
                 self.data[r] = term
         self.update_pattern()
@@ -182,6 +135,50 @@ class SpellCorrector:
             for line in fh:
                 search_terms.append(line.strip().lower())
         self.add_spelling_variant_pattern(search_terms, edit_distance=edit_distance)
+
+    def edit_distance_1(self, word):
+        """ Compute all strings that are one edit away from `word` using only
+            the letters in the corpus
+            Args:
+                word (str): The word for which to calculate the edit distance
+            Returns:
+                set: The set of strings that are edit distance one from the \
+                provided word """
+        word = ensure_unicode(word).lower()
+        if self.vocab.check_if_should_check(word):
+            return {word}
+        letters = LETTERS
+        splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
+        deletes = [L + R[1:] for L, R in splits if R]
+        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
+        replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
+        inserts = [L + c + R for L, R in splits for c in letters]
+        return set(deletes + transposes + replaces + inserts)
+
+    def edit_distance_2(self, word):
+        """ Compute all strings that are two edits away from `word` using only
+            the letters in the corpus
+            Args:
+                word (str): The word for which to calculate the edit distance
+            Returns:
+                set: The set of strings that are edit distance two from the \
+                provided word """
+        word = ensure_unicode(word).lower()
+        return [
+            e2 for e1 in self.edit_distance_1(word) for e2 in self.edit_distance_1(e1)
+        ]
+
+    def edit_distance_alt(self, words):
+        """ Compute all strings that are 1 edits away from all the words using
+            only the letters in the corpus
+            Args:
+                words (list): The words for which to calculate the edit distance
+            Returns:
+                set: The set of strings that are edit distance two from the \
+                provided words """
+        words = (ensure_unicode(w).lower() for w in words)
+        words = (w for w in words if self.vocab.check_if_should_check(w))
+        return [e2 for e1 in words for e2 in self.edit_distance_1(e1)]
 
 
 def retain_word_shape(old_word: str, new_word: str):
