@@ -144,13 +144,30 @@ class SpellCorrector:
     def __getitem__(self, item):
         return self.data[item]
 
+    def _larger_word_in_vocab(self, pre, capture, post):
+        context_word = f'{pre}{capture}{post}'.lower()
+        for word in context_word.split():
+            if word not in self.vocab:
+                return False
+        return True
+
     def _splititer(self, pat, text, context):
         prev = 0
         for m in pat.finditer(text):
-            yield text[prev:m.start()], text[m.start():m.end()], ' '.join(
-                text[m.start() - context: m.end() + context].split()
-            )
+            skipped_text = text[prev:m.start()]
+            capture = text[m.start():m.end()]
+            # are we in the middle of a word?
+            pretext = text[m.start() - context:m.start()]
+            posttext = text[m.end():m.end() + context]
+            pre = re.split(r'\W+', pretext)[-1]
+            post = re.split(r'\W+', posttext)[0]
+            if self._larger_word_in_vocab(pre, capture, post):
+                continue  # don't update prev, this will all be `skipped_text` next iteration
+            if len(pre) > 2 and pre in self.vocab:
+                skipped_text += ' '  # this should be a separate word
+            context_text = ' '.join(text[m.start() - context: m.end() + context].split())
             prev += m.end()
+            yield skipped_text, capture, context_text
         yield text[prev:], None, None
 
     def splititer(self, text, context=20):
