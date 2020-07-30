@@ -1,5 +1,5 @@
 import pathlib
-from collections import Counter
+from collections import Counter, defaultdict
 
 from regexify import PatternTrie
 import string
@@ -94,13 +94,19 @@ class Transformations:
 
     def __init__(self):
         self._transform = Counter()
+        self._transform_context = defaultdict(list)
         self._failed = Counter()
+        self._failed_context = defaultdict(list)
 
-    def transform(self, src, dest):
+    def transform(self, src, dest, context=None):
         self._transform[(src, dest)] += 1
+        if context:
+            self._transform_context[src].append(context)
 
-    def failed_to_transform(self, term):
+    def failed_to_transform(self, term, context):
         self._failed[term] += 1
+        if context:
+            self._failed_context[term].append(context)
 
     def to_file(self, d: pathlib.Path):
         with open(d / 'transform_freq.txt', 'w') as out:
@@ -109,6 +115,12 @@ class Transformations:
         with open(d / 'no_transform.txt', 'w') as out:
             for term, cnt in self._failed.most_common():
                 out.write(f'{term}\t{cnt}\n')
+        with open(d / 'transform_context.txt', 'w') as out:
+            for term, context in self._transform_context.items():
+                out.write(f'{term}\t{context}\n')
+        with open(d / 'no_transform_context.txt', 'w') as out:
+            for term, context in self._failed_context.items():
+                out.write(f'{term}\t{context}\n')
 
 
 class SpellCorrector:
@@ -132,11 +144,23 @@ class SpellCorrector:
     def __getitem__(self, item):
         return self.data[item]
 
-    def splititer(self, text):
-        return self._pattern.splititer(text)
+    def _splititer(self, pat, text, context):
+        prev = 0
+        for m in pat.finditer(text):
+            yield text[prev:m.start()], text[m.start():m.end()], ' '.join(
+                text[m.start() - context: m.end() + context].split()
+            )
+            prev += m.end()
+        yield text[prev:], None, None
+
+    def splititer(self, text, context=20):
+        yield from self._splititer(self._pattern, text, context)
+
+    def splititer_word(self, text, context=20):
+        yield from self._splititer(re.compile(r'(\w+)', re.I), text, context)
 
     def update_pattern(self):
-        self._pattern = re.compile(rf'({PatternTrie(*self._terms).pattern}){{e<=2:\S}}', re.I)
+        self._pattern = re.compile(rf'({PatternTrie(*self._terms).pattern}){{e<=2:\S}}', re.I | re.ENHANCEMATCH)
 
     def add_spelling_variant_pattern(self, search_terms, *, edit_distance=2):
         for term in search_terms:
@@ -217,24 +241,22 @@ def spell_correct_words(text, sc: SpellCorrector, transform: Transformations, *,
     if use_regex:
         it = sc.splititer(text)
     else:  # by word
-        it = re.splititer(r'(\w+)', text, flags=re.I)
-    for nonword in it:
+        it = sc.splititer_word(text)
+    for nonword, word, context in it:
         yield nonword
-        try:
-            word = next(it)
-        except StopIteration:
+        if not word:
             break
         lword = word.lower()
         if lword in sc.vocab:  # word already known
             yield word
         elif lword in sc:
             new_word = sc[lword]
-            transform.transform(lword, new_word)
-            logger.info(f'Changing {lword} to {new_word}')
+            transform.transform(lword, new_word, context)
+            logger.info(f'Changing {lword} to {new_word} ({context})')
             yield retain_word_shape(word, new_word)
         else:
-            transform.failed_to_transform(lword)
-            logger.warning(f'Failed to find term corresponding to {lword}, even though it was matched.')
+            transform.failed_to_transform(lword, context)
+            logger.warning(f'Failed to find term corresponding to {lword}, even though it was matched ({context})')
             yield word
 
 
