@@ -24,18 +24,18 @@ class Vocab:
         return len(self.data)
 
     @classmethod
-    def load_from_file(cls, filename):
+    def load_from_file(cls, filename, min_freq=2):
         vocab = cls()
         it = vocab._file_to_iter(filename)
-        vocab.add_words_from_iter(it)
+        vocab.add_words_from_iter(it, min_freq)
         return vocab
 
     @classmethod
-    def load_from_list(cls, lst):
+    def load_from_list(cls, lst, min_freq=2):
         vocab = cls()
         if not isinstance(lst[0], tuple):
             lst = ((w, 1) for w in lst)
-        vocab.add_words_from_iter(lst)
+        vocab.add_words_from_iter(lst, min_freq)
         return vocab
 
     def _clean_terms(self, term):
@@ -52,9 +52,10 @@ class Vocab:
             self.longest_word = term
         self.data[term] = freq
 
-    def add_words_from_iter(self, it):
+    def add_words_from_iter(self, it, min_freq=2):
         for term, freq in it:
-            self.add_word(term, freq)
+            if freq >= min_freq:
+                self.add_word(term, freq)
 
     def _file_to_iter(self, input_file, encoding='utf8'):
         if not input_file:
@@ -66,6 +67,9 @@ class Vocab:
 
     def __contains__(self, item):
         return item in self.data
+
+    def __getitem__(self, item):
+        return self.data.get(item, 0)
 
     def check_if_should_check(self, word):
         if word in self:
@@ -288,7 +292,7 @@ def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transf
 
 
 def correct_text(search_terms, search_term_path, input_directory, output_directory, vocab_file, min_freq=1, **kwargs):
-    vocab = Vocab.load_from_file(vocab_file)
+    vocab = Vocab.load_from_file(vocab_file, min_freq=min_freq)
     sc = SpellCorrector(vocab)
     sc.add_from_file(search_term_path)
     sc.add_spelling_variant_pattern(search_terms)
@@ -311,7 +315,7 @@ def correct_text_cmd():
     parser.add_argument('--vocab-file', dest='vocab_file', required=True,
                         help='File containing entire vocab, one word per line;'
                              r' word\tfreq is acceptable for use with min-freq option')
-    parser.add_argument('--min-freq', dest='min_freq', type=int, default=1,
+    parser.add_argument('--min-freq', dest='min_freq', type=int, default=3,
                         help='Minimum word frequency to include from vocab')
     parser.add_argument('--input-directory', dest='input_directory', required=True,
                         help='Directory, all containing files will be spell-corrected')
