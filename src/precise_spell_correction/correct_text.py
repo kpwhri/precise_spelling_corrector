@@ -1,5 +1,9 @@
+import os
 import pathlib
+import shelve
+import sqlite3
 from collections import Counter, defaultdict
+from typing import Pattern
 
 from regexify import PatternTrie
 import string
@@ -14,6 +18,10 @@ class Vocab:
     def __init__(self):
         self.data = {}
         self.longest_word = ''
+
+    @property
+    def keys(self):
+        return set(self.data.keys())
 
     @property
     def longest_word_length(self):
@@ -127,17 +135,80 @@ class Transformations:
                 out.write(f'{term}\t{context}\n')
 
 
+class Data:
+
+    def __init__(self, dbfile):
+        self.exists = os.path.isfile(dbfile)
+        self.conn = sqlite3.connect(dbfile)
+        self.cur = self.conn.cursor()
+        if not self.exists:
+            self.commit('create table lookup (variation text, target text)')
+            self.commit('create table metadata (key text, value text)')
+            self._initialize()
+
+    def _initialize(self):
+        self.commit('insert into metadata (key, value) values (?, ?) )', 'pattern1', '')
+        self.commit('insert into metadata (key, value) values (?, ?) )', 'pattern2', '')
+
+    def delete(self):
+        self.commit('delete from lookup')
+        self.commit('delete from metadata')
+        self._initialize()
+
+    def commit(self, query, *args):
+        self.cur.execute(query, args)
+        self.conn.commit()
+
+    def execute_fetchone(self, query, *args):
+        self.cur.execute(query, args)
+        val = self.cur.fetchone()
+        return val[0] if val else None
+
+    def get(self, metadata_key):
+        return self.execute_fetchone(f'select value from metadata where key = ?', metadata_key)
+
+    def add(self, metadatakey, metadatavalue):
+        self.commit(f"insert into metadata (key, value) values (?, ?)", metadatakey, metadatavalue)
+
+    def set(self, metadatakey, metadatavalue):
+        self.commit(f"update metadata set value = ? where key = ?", metadatavalue, metadatakey)
+
+    def __getitem__(self, item):
+        return self.execute_fetchone(f'select target from lookup where variation = ?', item)
+
+    def __setitem__(self, key, value):
+        self.commit(f"insert into lookup (variation, target) values (?, ?)", key, value)
+
+    def __contains__(self, item):
+        return bool(self.cur.execute(f'select variation from lookup limit 1').fetchone())
+
+    def __len__(self):
+        return self.execute_fetchone(f'select count(*) from lookup')
+
+    def keys(self):
+        for r in self.cur.execute(f'select variation from lookup'):
+            yield r[0]
+
+    def contains_term(self, term):
+        return self.execute_fetchone(f"select variation from lookup where target = ? limit 1", term) is not None
+
+
 class SpellCorrector:
 
-    def __init__(self, vocab, ):
-        self.data = {}
+    def __init__(self, vocab, dbfile='spell_corrector_terms'):
+        self.data = Data(dbfile)
         self.vocab = vocab
-        self._pattern = None
+        self._pattern = self.data.get('pattern1')  # no word boundary, enhanced
+        self._pattern2 = self.data.get('pattern2')  # strict, word boundary
         self._terms = []
 
     @property
     def pattern(self):
         return self._pattern
+
+    @property
+    def pattern_strict(self):
+        return self._pattern2
 
     def __bool__(self):
         return len(self.data) > 0
@@ -155,7 +226,7 @@ class SpellCorrector:
                 return False
         return True
 
-    def _splititer(self, pat, text, context):
+    def _splititer(self, pat: Pattern, text, context):
         prev = 0
         for m in pat.finditer(text):
             skipped_text = text[prev:m.start()]
@@ -177,24 +248,46 @@ class SpellCorrector:
     def splititer(self, text, context=20):
         yield from self._splititer(self._pattern, text, context)
 
+    def splititer_strict(self, text, context=20):
+        yield from self._splititer(self._pattern2, text, context)
+
     def splititer_word(self, text, context=20):
         yield from self._splititer(re.compile(r'(\w+)', re.I), text, context)
 
+    def _is_first_last_letter(self, word):
+        if word[0] in string.ascii_lowercase and word[-1] in string.ascii_lowercase:
+            return True
+        return False
+
     def update_pattern(self):
         self._pattern = re.compile(rf'({PatternTrie(*self._terms).pattern}){{e<=2:\S}}', re.I | re.ENHANCEMATCH)
+        self.data.set('pattern1', self._pattern.pattern)
+        self._pattern2 = re.compile(
+            rf'\b({PatternTrie(*(x for x in self.data.keys() if self._is_first_last_letter(x))).pattern})\b',
+            re.I
+        )
+        self.data.set('pattern2', self._pattern2.pattern)
+        pass
 
-    def add_spelling_variant_pattern(self, search_terms, *, edit_distance=2):
+    def add_spelling_variant_pattern(self, search_terms, *, edit_distance=2, reload=False):
+        if reload:
+            self.data.delete()
         for term in search_terms:
             term = term.lower()
             self._terms.append(term)
             self.vocab.add_word(term, 1)
+            if self.data.contains_term(term):
+                logger.info(f'Already loaded: {term}')
+                continue
             # get edit distance 1...
-            res = [x for x in self.edit_distance_1(term)]
+            res = (x for x in self.edit_distance_1(term))
             # if still not found, use the edit distance 1 to calc edit distance 2
             if edit_distance == 2:
-                res = [x for x in self.edit_distance_alt(res)]
-            for r in res:
-                self.data[r] = term
+                for r in self.edit_distance_alt(res):
+                    self.data[r] = term
+            else:
+                for r in res:
+                    self.data[r] = term
         self.update_pattern()
 
     def add_from_file(self, filename, *, edit_distance=2):
@@ -204,7 +297,7 @@ class SpellCorrector:
                 search_terms.append(line.strip().lower())
         self.add_spelling_variant_pattern(search_terms, edit_distance=edit_distance)
 
-    def edit_distance_1(self, word):
+    def edit_distance_1(self, word, check_vocab=True):
         """ Compute all strings that are one edit away from `word` using only
             the letters in the corpus
             Args:
@@ -213,7 +306,7 @@ class SpellCorrector:
                 set: The set of strings that are edit distance one from the \
                 provided word """
         word = ensure_unicode(word).lower()
-        if self.vocab.check_if_should_check(word):
+        if check_vocab and self.vocab.check_if_should_check(word):
             return {word}
         letters = LETTERS
         splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
@@ -246,7 +339,11 @@ class SpellCorrector:
                 provided words """
         words = (ensure_unicode(w).lower() for w in words)
         words = (w for w in words if self.vocab.check_if_should_check(w))
-        return [e2 for e1 in words for e2 in self.edit_distance_1(e1)]
+        for e1 in words:
+            yield e1
+            for e2 in self.edit_distance_1(e1, check_vocab=False):
+                if self.vocab.check_if_should_check(e2):
+                    yield e2
 
 
 def retain_word_shape(old_word: str, new_word: str):
@@ -257,13 +354,8 @@ def retain_word_shape(old_word: str, new_word: str):
     return new_word
 
 
-def spell_correct_words(text, sc: SpellCorrector, transform: Transformations, *, use_regex=True):
-    text = ''.join([i if ord(i) < 128 else ' ' for i in text])  # strip non-ascii
-    if use_regex:
-        it = sc.splititer(text)
-    else:  # by word
-        it = sc.splititer_word(text)
-    for nonword, word, context in it:
+def spell_correct_words(text_iter, sc: SpellCorrector, transform: Transformations):
+    for nonword, word, context in text_iter:
         yield nonword
         if not word:
             break
@@ -281,14 +373,22 @@ def spell_correct_words(text, sc: SpellCorrector, transform: Transformations, *,
             yield word
 
 
-def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transformations):
+def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transformations, *, use_regex=False):
     dest.mkdir(exist_ok=True)
     for source_path in (p for p in source.rglob('*') if p.is_file()):
         dest_path = (dest / source_path.relative_to(source)).resolve()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(source_path, encoding='utf8') as fh, open(dest_path, 'w', encoding='utf8') as out:
-            for segment in spell_correct_words(fh.read(), sc, transform):
-                out.write(segment)
+            text = ''.join([i if ord(i) < 128 else ' ' for i in fh.read()])  # strip non-ascii
+            if use_regex:  # by word
+                for segment in spell_correct_words(sc.splititer_word(text), sc, transform):
+                    out.write(segment)
+            else:
+                logger.info('# Stage 1')
+                text = ''.join([x for x in spell_correct_words(sc.splititer(text), sc, transform)])
+                logger.info('# Stage 2')
+                for segment in spell_correct_words(sc.splititer_strict(text), sc, transform):
+                    out.write(segment)
 
 
 def correct_text(search_terms, search_term_path, input_directory, output_directory, vocab_file, min_freq=1, **kwargs):
