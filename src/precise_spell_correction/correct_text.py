@@ -146,8 +146,8 @@ class Data:
             self._initialize()
 
     def _initialize(self):
-        self.commit('insert into metadata (key, value) values (?, ?) )', 'pattern1', '')
-        self.commit('insert into metadata (key, value) values (?, ?) )', 'pattern2', '')
+        self.commit('insert into metadata (key, value) values (?, ?)', 'pattern1', '')
+        self.commit('insert into metadata (key, value) values (?, ?)', 'pattern2', '')
 
     def delete(self):
         self.commit('delete from lookup')
