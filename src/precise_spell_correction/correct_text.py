@@ -1,6 +1,5 @@
 import os
 import pathlib
-import shelve
 import sqlite3
 from collections import Counter, defaultdict
 from typing import Pattern
