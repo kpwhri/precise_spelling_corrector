@@ -193,7 +193,7 @@ class Data:
         self.commit(f"insert into lookup (variation, target) values (?, ?)", key, value)
 
     def __contains__(self, item):
-        return self.execute_fetchone(f'select target from lookup where variation = ?') is not None
+        return self.execute_fetchone(f'select target from lookup where variation = ?', item) is not None
 
     def __len__(self):
         return self.execute_fetchone(f'select count(*) from lookup')
