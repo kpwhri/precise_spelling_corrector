@@ -2,6 +2,7 @@ import os
 import pathlib
 import sqlite3
 from collections import Counter, defaultdict
+from functools import lru_cache
 from typing import Pattern
 
 from regexify import PatternTrie
@@ -17,6 +18,7 @@ class Vocab:
     def __init__(self):
         self.data = {}
         self.longest_word = ''
+        self._punct_table = str.maketrans({key: ' ' for key in string.punctuation})
 
     @property
     def keys(self):
@@ -73,7 +75,15 @@ class Vocab:
                     yield term, freq
 
     def __contains__(self, item):
-        return item in self.data
+        if item in self.data:
+            return True
+        no_punct = item.translate(self._punct_table).strip()
+        if no_punct in self.data:
+            return True
+        for w in no_punct.split():
+            if w not in self.data:
+                return False
+        return True
 
     def __getitem__(self, item):
         return self.data.get(item, 0)
@@ -90,7 +100,6 @@ class Vocab:
             return False
         except ValueError:
             pass
-
         return True
 
 
@@ -148,6 +157,7 @@ class Data:
     def _initialize(self):
         self.commit('insert into metadata (key, value) values (?, ?)', 'pattern1', '')
         self.commit('insert into metadata (key, value) values (?, ?)', 'pattern2', '')
+        self.save()
 
     def delete(self):
         self.commit('delete from lookup')
@@ -156,11 +166,15 @@ class Data:
 
     def commit(self, query, *args):
         self.cur.execute(query, args)
+        # self.conn.commit()
+
+    def save(self):
         self.conn.commit()
 
+    @lru_cache(maxsize=256)
     def execute_fetchone(self, query, *args):
-        self.cur.execute(query, args)
-        val = self.cur.fetchone()
+        self.save()
+        val = self.cur.execute(query, args).fetchone()
         return val[0] if val else None
 
     def get(self, metadata_key):
@@ -179,12 +193,13 @@ class Data:
         self.commit(f"insert into lookup (variation, target) values (?, ?)", key, value)
 
     def __contains__(self, item):
-        return bool(self.cur.execute(f'select variation from lookup limit 1').fetchone())
+        return self.execute_fetchone(f'select target from lookup where variation = ?') is not None
 
     def __len__(self):
         return self.execute_fetchone(f'select count(*) from lookup')
 
     def keys(self):
+        self.save()
         for r in self.cur.execute(f'select variation from lookup'):
             yield r[0]
 
@@ -194,11 +209,11 @@ class Data:
 
 class SpellCorrector:
 
-    def __init__(self, vocab, dbfile='spell_corrector_terms'):
+    def __init__(self, vocab: Vocab, dbfile='spell_corrector_terms'):
         self.data = Data(dbfile)
         self.vocab = vocab
-        self._pattern = self.data.get('pattern1')  # no word boundary, enhanced
-        self._pattern2 = self.data.get('pattern2')  # strict, word boundary
+        self._pattern = re.compile(self.data.get('pattern1'), re.I | re.ENHANCEMATCH)  # no word boundary, enhanced
+        self._pattern2 = re.compile(self.data.get('pattern2'), re.I)  # strict, word boundary
         self._terms = []
 
     @property
@@ -266,12 +281,14 @@ class SpellCorrector:
             re.I
         )
         self.data.set('pattern2', self._pattern2.pattern)
-        pass
+        self.data.save()
 
     def add_spelling_variant_pattern(self, search_terms, *, edit_distance=2, reload=False):
+        logger.info(f'Edit distance: {edit_distance}')
         if reload:
             self.data.delete()
         for term in search_terms:
+            logger.info(f'Loading {term}')
             term = term.lower()
             self._terms.append(term)
             self.vocab.add_word(term, 1)
@@ -390,11 +407,12 @@ def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transf
                     out.write(segment)
 
 
-def correct_text(search_terms, search_term_path, input_directory, output_directory, vocab_file, min_freq=1, **kwargs):
+def correct_text(search_terms, search_term_path, input_directory, output_directory, vocab_file, *,
+                 min_freq=1, dbfile='spell_corrector_terms', edit_distance=2, **kwargs):
     vocab = Vocab.load_from_file(vocab_file, min_freq=min_freq)
-    sc = SpellCorrector(vocab)
-    sc.add_from_file(search_term_path)
-    sc.add_spelling_variant_pattern(search_terms)
+    sc = SpellCorrector(vocab, dbfile=dbfile)
+    sc.add_from_file(search_term_path, edit_distance=edit_distance)
+    sc.add_spelling_variant_pattern(search_terms, edit_distance=edit_distance)
     if not sc:
         raise ValueError('No search terms provided.')
     source = pathlib.Path(input_directory)
@@ -416,6 +434,10 @@ def correct_text_cmd():
                              r' word\tfreq is acceptable for use with min-freq option')
     parser.add_argument('--min-freq', dest='min_freq', type=int, default=3,
                         help='Minimum word frequency to include from vocab')
+    parser.add_argument('--edit-distance', dest='edit_distance', type=int, default=2,
+                        help='Edit distance measure, defaults to 2')
+    parser.add_argument('--dbfile', default='spell_corrector_terms',
+                        help='Path to sqlite database file.')
     parser.add_argument('--input-directory', dest='input_directory', required=True,
                         help='Directory, all containing files will be spell-corrected')
     parser.add_argument('--output-directory', dest='output_directory', required=True,
@@ -424,9 +446,9 @@ def correct_text_cmd():
     args = parser.parse_args()
 
     logger.add(pathlib.Path(args.output_directory) / 'correct_text.log')
-
     correct_text(args.search_terms, args.search_term_file, args.input_directory, args.output_directory,
-                 args.vocab_file, args.min_freq
+                 args.vocab_file,
+                 min_freq=args.min_freq, dbfile=args.dbfile, edit_distance=args.edit_distance
                  )
 
 
