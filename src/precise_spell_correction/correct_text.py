@@ -256,6 +256,8 @@ class SpellCorrector:
 
     def _larger_word_in_vocab(self, pre, capture, post):
         context_word = f'{pre}{capture}{post}'.lower()
+        if capture.lower() == context_word.strip():
+            return False
         for word in context_word.split():
             if word not in self.vocab:
                 return False
@@ -276,7 +278,7 @@ class SpellCorrector:
             if len(pre) > 2 and pre in self.vocab:
                 skipped_text += ' '  # this should be a separate word
             context_text = ' '.join(text[m.start() - context: m.end() + context].split())
-            prev += m.end()
+            prev = m.end()
             yield skipped_text, capture, context_text
         yield text[prev:], None, None
 
