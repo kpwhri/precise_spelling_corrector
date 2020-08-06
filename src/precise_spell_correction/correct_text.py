@@ -1,3 +1,4 @@
+import difflib
 import os
 import pathlib
 import sqlite3
@@ -19,6 +20,17 @@ class Vocab:
         self.data = {}
         self.longest_word = ''
         self._punct_table = str.maketrans({key: ' ' for key in string.punctuation})
+
+    def _exclude_common_misspell(self, term):
+        if term[:3] == 'the':
+            return False
+        return True
+
+    def get_closest_match(self, word):
+        lst = difflib.get_close_matches(word.strip(), self.data.keys(), n=100, cutoff=0.70)
+        if not lst:
+            return None
+        return max((self.data[el], el) for el in lst if self._exclude_common_misspell(el))[1]
 
     @property
     def keys(self):
@@ -61,7 +73,7 @@ class Vocab:
             self.longest_word = term
         self.data[term] = freq
 
-    def add_words_from_iter(self, it, min_freq=2):
+    def add_words_from_iter(self, it, min_freq=10):
         for term, freq in it:
             if freq >= min_freq:
                 self.add_word(term, freq)
@@ -150,7 +162,7 @@ class Data:
         self.conn = sqlite3.connect(dbfile)
         self.cur = self.conn.cursor()
         if not self.exists:
-            self.commit('create table lookup (variation text, target text)')
+            self.commit('create table lookup (variation text, target text, edit_distance integer)')
             self.commit('create table metadata (key text, value text)')
             self._initialize()
 
@@ -190,7 +202,11 @@ class Data:
         return self.execute_fetchone(f'select target from lookup where variation = ?', item)
 
     def __setitem__(self, key, value):
-        self.commit(f"insert into lookup (variation, target) values (?, ?)", key, value)
+        self.set_edit_distance(key, value, edit_distance=1)
+
+    def set_edit_distance(self, key, value, edit_distance=1):
+        self.commit(f"insert into lookup (variation, target, edit_distance) values (?, ?, ?)", key, value,
+                    edit_distance)
 
     def __contains__(self, item):
         return self.execute_fetchone(f'select target from lookup where variation = ?', item) is not None
@@ -200,7 +216,12 @@ class Data:
 
     def keys(self):
         self.save()
-        for r in self.cur.execute(f'select variation from lookup'):
+        for r in self.cur.execute('select distinct target from lookup'):
+            yield r[0]
+
+    def values(self, edit_distance=1):
+        self.save()
+        for r in self.cur.execute(f'select variation from lookup where edit_distance = ?', (edit_distance,)):
             yield r[0]
 
     def contains_term(self, term):
@@ -277,7 +298,8 @@ class SpellCorrector:
         self._pattern = re.compile(rf'({PatternTrie(*self._terms).pattern}){{e<=2:\S}}', re.I | re.ENHANCEMATCH)
         self.data.set('pattern1', self._pattern.pattern)
         self._pattern2 = re.compile(
-            rf'\b({PatternTrie(*(x for x in self.data.keys() if self._is_first_last_letter(x))).pattern})\b',
+            rf'\b({PatternTrie(*(x for x in self.data.values() if self._is_first_last_letter(x))).pattern})'
+            rf'{{e<=2:[A-Za-z\s]}}\b',
             re.I
         )
         self.data.set('pattern2', self._pattern2.pattern)
@@ -285,25 +307,23 @@ class SpellCorrector:
 
     def add_spelling_variant_pattern(self, search_terms, *, edit_distance=2, reload=False):
         logger.info(f'Edit distance: {edit_distance}')
+        keys = set(self.data.keys())
         if reload:
             self.data.delete()
         for term in search_terms:
             logger.info(f'Loading {term}')
             term = term.lower()
             self._terms.append(term)
-            self.vocab.add_word(term, 1)
-            if self.data.contains_term(term):
+            self.vocab.add_word(term, 10000)
+            if term in keys:
                 logger.info(f'Already loaded: {term}')
                 continue
             # get edit distance 1...
-            res = (x for x in self.edit_distance_1(term))
-            # if still not found, use the edit distance 1 to calc edit distance 2
-            if edit_distance == 2:
-                for r in self.edit_distance_alt(res):
-                    self.data[r] = term
-            else:
-                for r in res:
-                    self.data[r] = term
+            for r in self.edit_distance_1(term):
+                self.data[r] = term
+                if edit_distance == 2:
+                    for r2 in self.edit_distance_alt(r):
+                        self.data.set_edit_distance(r2, term, edit_distance=2)
         self.update_pattern()
 
     def add_from_file(self, filename, *, edit_distance=2):
@@ -327,10 +347,11 @@ class SpellCorrector:
         letters = LETTERS
         splits = [(word[:i], word[i:]) for i in range(len(word) + 1)]
         deletes = [L + R[1:] for L, R in splits if R]
-        transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
+        # transposes = [L + R[1] + R[0] + R[2:] for L, R in splits if len(R) > 1]
         replaces = [L + c + R[1:] for L, R in splits if R for c in letters]
         inserts = [L + c + R for L, R in splits for c in letters]
-        return set(deletes + transposes + replaces + inserts)
+        return set(x for x in deletes + replaces + inserts if
+                   x[0] in string.ascii_lowercase and x[-1] in string.ascii_lowercase and x not in self.vocab)
 
     def edit_distance_2(self, word):
         """ Compute all strings that are two edits away from `word` using only
@@ -345,6 +366,14 @@ class SpellCorrector:
             e2 for e1 in self.edit_distance_1(word) for e2 in self.edit_distance_1(e1)
         ]
 
+    def edit_distance_alt_word(self, word):
+        word = word.lower()
+        if not self.vocab.check_if_should_check(word):
+            return
+        for e2 in self.edit_distance_1(word, check_vocab=False):
+            if self.vocab.check_if_should_check(e2):
+                yield e2
+
     def edit_distance_alt(self, words):
         """ Compute all strings that are 1 edits away from all the words using
             only the letters in the corpus
@@ -356,10 +385,7 @@ class SpellCorrector:
         words = (ensure_unicode(w).lower() for w in words)
         words = (w for w in words if self.vocab.check_if_should_check(w))
         for e1 in words:
-            yield e1
-            for e2 in self.edit_distance_1(e1, check_vocab=False):
-                if self.vocab.check_if_should_check(e2):
-                    yield e2
+            yield from self.edit_distance_alt_word(e1)
 
 
 def retain_word_shape(old_word: str, new_word: str):
@@ -370,7 +396,7 @@ def retain_word_shape(old_word: str, new_word: str):
     return new_word
 
 
-def spell_correct_words(text_iter, sc: SpellCorrector, transform: Transformations):
+def spell_correct_words(text_iter, sc: SpellCorrector, transform: Transformations, *, get_closest_match=False):
     for nonword, word, context in text_iter:
         yield nonword
         if not word:
@@ -383,6 +409,17 @@ def spell_correct_words(text_iter, sc: SpellCorrector, transform: Transformation
             transform.transform(lword, new_word, context)
             logger.info(f'Changing {lword} to {new_word} ({context})')
             yield retain_word_shape(word, new_word)
+        elif get_closest_match:
+            new_word = sc.vocab.get_closest_match(lword)
+            if new_word is None:
+                transform.failed_to_transform(lword, context)
+                logger.warning(f'Failed to find term corresponding to {lword}, even though it was matched ({context})')
+                yield word
+            else:
+                logger.info(f'Used lookup to change {lword} to {new_word} ({context})')
+                if lword[0] == ' ' or lword[-1] == ' ':
+                    new_word = f' {new_word} '
+                yield retain_word_shape(word, new_word)
         else:
             transform.failed_to_transform(lword, context)
             logger.warning(f'Failed to find term corresponding to {lword}, even though it was matched ({context})')
@@ -403,7 +440,7 @@ def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transf
                 logger.info('# Stage 1')
                 text = ''.join([x for x in spell_correct_words(sc.splititer(text), sc, transform)])
                 logger.info('# Stage 2')
-                for segment in spell_correct_words(sc.splititer_strict(text), sc, transform):
+                for segment in spell_correct_words(sc.splititer_strict(text), sc, transform, get_closest_match=True):
                     out.write(segment)
 
 
@@ -434,7 +471,7 @@ def correct_text_cmd():
                              r' word\tfreq is acceptable for use with min-freq option')
     parser.add_argument('--min-freq', dest='min_freq', type=int, default=3,
                         help='Minimum word frequency to include from vocab')
-    parser.add_argument('--edit-distance', dest='edit_distance', type=int, default=2,
+    parser.add_argument('--edit-distance', dest='edit_distance', type=int, default=1,
                         help='Edit distance measure, defaults to 2')
     parser.add_argument('--dbfile', default='spell_corrector_terms',
                         help='Path to sqlite database file.')
