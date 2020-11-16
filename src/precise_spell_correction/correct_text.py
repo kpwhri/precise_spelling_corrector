@@ -14,6 +14,9 @@ from loguru import logger
 LETTERS = ' ' + string.ascii_letters + string.digits + string.punctuation
 
 
+TRANSFORMATION = None
+
+
 class Vocab:
 
     def __init__(self):
@@ -28,9 +31,10 @@ class Vocab:
 
     def get_closest_match(self, word):
         lst = difflib.get_close_matches(word.strip(), self.data.keys(), n=100, cutoff=0.70)
+        lst = [el for el in lst if self._exclude_common_misspell(el)]
         if not lst:
             return None
-        return max((self.data[el], el) for el in lst if self._exclude_common_misspell(el))[1]
+        return max((self.data[el], el) for el in lst)[1]
 
     @property
     def keys(self):
@@ -140,17 +144,17 @@ class Transformations:
         if context:
             self._failed_context[term].append(context)
 
-    def to_file(self, d: pathlib.Path):
-        with open(d / 'transform_freq.txt', 'w') as out:
+    def to_file(self, d: pathlib.Path, encoding='utf8'):
+        with open(d / 'transform_freq.txt', 'w', encoding=encoding) as out:
             for (src, dest), cnt in self._transform.most_common():
                 out.write(f'{src}\t{dest}\t{cnt}\n')
-        with open(d / 'no_transform.txt', 'w') as out:
+        with open(d / 'no_transform.txt', 'w', encoding=encoding) as out:
             for term, cnt in self._failed.most_common():
                 out.write(f'{term}\t{cnt}\n')
-        with open(d / 'transform_context.txt', 'w') as out:
+        with open(d / 'transform_context.txt', 'w', encoding=encoding) as out:
             for term, context in self._transform_context.items():
                 out.write(f'{term}\t{context}\n')
-        with open(d / 'no_transform_context.txt', 'w') as out:
+        with open(d / 'no_transform_context.txt', 'w', encoding=encoding) as out:
             for term, context in self._failed_context.items():
                 out.write(f'{term}\t{context}\n')
 
@@ -446,8 +450,8 @@ def iteratively_correct_text(source, dest, sc: SpellCorrector, transform: Transf
                     out.write(segment)
 
 
-def correct_text(search_terms, search_term_path, input_directory, output_directory, vocab_file, *,
-                 min_freq=1, dbfile='spell_corrector_terms', edit_distance=2, **kwargs):
+def correct_text_in_directory(search_terms, search_term_path, input_directory, output_directory, vocab_file, 
+                              *, min_freq=1, dbfile='spell_corrector_terms', edit_distance=2, **kwargs):
     vocab = Vocab.load_from_file(vocab_file, min_freq=min_freq)
     sc = SpellCorrector(vocab, dbfile=dbfile)
     sc.add_from_file(search_term_path, edit_distance=edit_distance)
@@ -459,6 +463,34 @@ def correct_text(search_terms, search_term_path, input_directory, output_directo
     transform = Transformations()
     iteratively_correct_text(source, dest, sc, transform)
     transform.to_file(dest)
+
+
+def get_transform(create_new=False):
+    """Get a transformation; stored globally to allow easy retrieval of results"""
+    global TRANSFORMATION
+    if create_new or TRANSFORMATION is None:
+        TRANSFORMATION = Transformations()
+    return TRANSFORMATION
+
+
+def correct_text(text, sc, transform=None):
+    """Spell correct any text given a `SpellCorrector` and a `Transformations`"""
+    if not transform:
+        transform = get_transform()
+    text = ''.join([x for x in spell_correct_words(sc.splititer(text), sc, transform)])
+    return ''.join(spell_correct_words(sc.splititer_strict(text), sc, transform, get_closest_match=True))
+
+
+def correct_text_dataframe(df, colname, term_path, vocab_path, *, min_freq=3, edit_distance=1, 
+                           transform=None):
+    vocab = Vocab.load_from_file(vocab_path, min_freq=min_freq)
+    sc = SpellCorrector(vocab, dbfile='search_term_file')
+    sc.add_from_file(term_path, edit_distance=edit_distance)
+    if not transform:
+        transform = get_transform()
+    return df[colname].apply(
+        lambda text: correct_text(text, sc, transform)
+    )
 
 
 def correct_text_cmd():
@@ -485,10 +517,11 @@ def correct_text_cmd():
     args = parser.parse_args()
 
     logger.add(pathlib.Path(args.output_directory) / 'correct_text.log')
-    correct_text(args.search_terms, args.search_term_file, args.input_directory, args.output_directory,
-                 args.vocab_file,
-                 min_freq=args.min_freq, dbfile=args.dbfile, edit_distance=args.edit_distance
-                 )
+    correct_text_in_directory(args.search_terms, args.search_term_file, 
+                              args.input_directory, args.output_directory,
+                              args.vocab_file, 
+                              min_freq=args.min_freq, dbfile=args.dbfile, edit_distance=args.edit_distance
+                              )
 
 
 if __name__ == '__main__':
