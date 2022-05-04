@@ -506,7 +506,7 @@ def correct_text_cmd():
     parser.add_argument('--min-freq', dest='min_freq', type=int, default=3,
                         help='Minimum word frequency to include from vocab')
     parser.add_argument('--edit-distance', dest='edit_distance', type=int, default=1,
-                        help='Edit distance measure, defaults to 2')
+                        help='Edit distance measure, defaults to 1')
     parser.add_argument('--dbfile', default='spell_corrector_terms',
                         help='Path to sqlite database file.')
     parser.add_argument('--input-directory', dest='input_directory', required=True,

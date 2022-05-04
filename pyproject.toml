@@ -27,3 +27,5 @@ classifiers = [# https://pypi.org/classifiers/
     'Topic :: Text Processing :: Linguistic',
     'License :: OSI Approved :: MIT License',
 ]
+[project.scripts]
+run-precise-spelling-corrector = "precise_spell_correction.correct_text:correct_text_cmd"
